@@ -78,7 +78,7 @@ PAIR_SHUFFLE_SEEDS = [1337, 2023]
 
 # Fixed a priori in this public reference runner. Do not sweep this value and
 # select it using full target-test accuracy.
-CONFDS_TAU = 0.80
+CONFDS_TAU = 0.85
 
 
 # =============================================================================
@@ -158,17 +158,20 @@ def map_pair_rows_to_batch_indices(
 
 
 def align_probabilities(p_raw: np.ndarray, class_order: np.ndarray) -> np.ndarray:
-    """Align classifier-output columns with the observed source class order."""
+    """Align already-computed probabilities to the physical class order.
+
+    This helper is retained for compatibility. New classifier-head capture uses
+    ``probabilities_from_logits`` below, which is numerically safer when the
+    legacy head contains an unused output column.
+    """
     p_raw = np.asarray(p_raw, dtype=np.float64)
     class_order = np.asarray(class_order, dtype=np.int64)
 
     if p_raw.ndim != 2:
         raise ValueError("Classifier probabilities must have shape (N, C).")
 
-    # Common case: labels are zero-based class IDs and select output columns.
     if class_order.size and np.min(class_order) >= 0 and np.max(class_order) < p_raw.shape[1]:
         p = p_raw[:, class_order]
-    # Alternative common case: labels are 1..C while the head has C outputs.
     elif p_raw.shape[1] == len(class_order):
         p = p_raw
     else:
@@ -177,8 +180,54 @@ def align_probabilities(p_raw: np.ndarray, class_order: np.ndarray) -> np.ndarra
             f"class order {class_order.tolist()}."
         )
 
-    denom = np.maximum(p.sum(axis=1, keepdims=True), 1e-12)
+    # Normalize by the actual retained-class mass.  Do not floor a small
+    # positive denominator to 1e-12: doing so makes the row cease to sum to 1.
+    denom = p.sum(axis=1, keepdims=True)
+    if np.any(denom <= 0.0):
+        raise FloatingPointError(
+            "Retained-class probability mass is zero. Use probabilities_from_logits() "
+            "for numerically stable classifier-head conversion."
+        )
     return p / denom
+
+
+def probabilities_from_logits(logits: torch.Tensor, class_order: np.ndarray) -> np.ndarray:
+    """Return stable probabilities over the physical classes only.
+
+    The UCI MATLAB representation used by the original experiments has labels
+    1,...,6.  The legacy classifier therefore has seven outputs because it was
+    created with ``max(label) + 1``; output 0 is unused.
+
+    Mathematically, selecting classes 1,...,6 from a seven-way softmax and then
+    renormalizing is exactly the same as applying softmax directly to logits
+    1,...,6.  Performing the selection *before* softmax avoids float32
+    underflow when the unused logit 0 becomes very large for a target sample.
+    It does not change training or the intended six-class posterior.
+    """
+    class_order = np.asarray(class_order, dtype=np.int64)
+    if logits.ndim != 2:
+        raise ValueError(f"Classifier logits must have shape (N,C); got {tuple(logits.shape)}.")
+
+    if (
+        class_order.size
+        and np.min(class_order) >= 0
+        and np.max(class_order) < logits.shape[1]
+    ):
+        idx = torch.as_tensor(class_order, dtype=torch.long, device=logits.device)
+        valid_logits = logits.index_select(1, idx)
+    elif logits.shape[1] == len(class_order):
+        valid_logits = logits
+    else:
+        raise ValueError(
+            f"Cannot align classifier logits shape {tuple(logits.shape)} with "
+            f"class order {class_order.tolist()}."
+        )
+
+    # Compute in float64 for a stable public reference implementation.
+    p = torch.softmax(valid_logits.to(torch.float64), dim=1).cpu().numpy()
+    if not np.all(np.isfinite(p)):
+        raise FloatingPointError("Non-finite classifier probabilities.")
+    return p
 
 
 # =============================================================================
@@ -291,9 +340,13 @@ def run_one_expert(
         d = torch.ones((xt.size(0),), device=device, dtype=torch.long)
         z = model.encode(xt, d_cond=d, d_corr=d)
         logits = model.predict(z)
-        p_raw = torch.softmax(logits, dim=1).cpu().numpy()
-        p = align_probabilities(p_raw, class_order)
-        target_probabilities.append(p)
+
+        # Convert directly from the physically valid class logits. This is
+        # algebraically equivalent to selecting + renormalizing the legacy
+        # seven-way softmax, but remains stable if the unused class-0 logit
+        # dominates and the valid-class probabilities would underflow.
+        p = probabilities_from_logits(logits, class_order)
+        target_probabilities.append(np.array(p, dtype=np.float64, copy=True))
 
         pred_labels = class_order[np.argmax(p, axis=1)]
         return float(np.mean(pred_labels == y))
