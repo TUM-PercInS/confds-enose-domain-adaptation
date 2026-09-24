@@ -1,4 +1,3 @@
-# confds-enose-domain-adaptation
 # Confidence-Aware Multi-Expert Domain Adaptation for E-Nose Sensor Drift
 
 Reference implementation for:
