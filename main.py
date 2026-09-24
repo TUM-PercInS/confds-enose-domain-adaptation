@@ -36,9 +36,12 @@ associated with the target members of the allowed transfer-pair subset.
 
 Reproducibility note
 --------------------
-This public runner uses a FIXED ConfDS confidence threshold (default 0.80).
-It does not sweep the threshold using full target-test labels, does not perform
-oracle evaluation, and does not apply development-only source pruning.
+This public runner uses a FIXED ConfDS confidence threshold (default 0.80) and
+retains the source-only expert pruning used in the original final experiment.
+The pruning criterion uses labelled source data only and therefore does not
+consume target calibration labels or target-test labels. The runner does not
+sweep the ConfDS threshold using full target-test labels and does not perform
+oracle evaluation.
 
 The --smoke option provides a fast end-to-end software test: one run, b02 only,
 two experts, and 20 optimizer iterations per expert by default. Smoke-test
@@ -78,7 +81,14 @@ PAIR_SHUFFLE_SEEDS = [1337, 2023]
 
 # Fixed a priori in this public reference runner. Do not sweep this value and
 # select it using full target-test accuracy.
-CONFDS_TAU = 0.85
+CONFDS_TAU = 0.5
+
+# Source-only expert pruning retained from the original final experiment.
+# This uses source labels only; it does not consume target labels.
+ENABLE_SRC_PRUNE = True
+SRC_PRUNE_THRESH = 0.95
+SRC_PRUNE_KEEP_MIN = 10
+SRC_EVAL_MAX = 6000
 
 
 # =============================================================================
@@ -301,8 +311,13 @@ def run_one_expert(
     transfer_pairs,
     class_order: np.ndarray,
     cfg: Dict,
-) -> List[np.ndarray]:
-    """Train one expert and return its probability matrix for every target batch."""
+) -> Tuple[List[np.ndarray], float, List[float]]:
+    """Train one expert and capture target probabilities plus source-head accuracy.
+
+    Source-head accuracy is evaluated after each target-step training using only
+    the labelled source batch (b01). Its mean is used by the source-only pruning
+    rule from the original final experiment.
+    """
     cdan = import_fresh(f"cdan_{cfg['name']}", cdan_path)
 
     # Apply expert-specific mechanism/weight overrides.
@@ -327,29 +342,55 @@ def run_one_expert(
     seed_all(seed)
 
     target_probabilities: List[np.ndarray] = []
+    source_head_accuracies: List[float] = []
     original_head_acc = cdan.head_acc
+
+    # Source-only evaluation data. The UCI source batch is small, but preserve
+    # the cap used by the original runner for generality.
+    x_src = data[0]
+    y_src = labels[0]
+    if SRC_EVAL_MAX is not None and x_src.shape[0] > int(SRC_EVAL_MAX):
+        rng = np.random.RandomState(12345 + seed)
+        src_idx = rng.choice(
+            x_src.shape[0],
+            size=int(SRC_EVAL_MAX),
+            replace=False,
+        )
+        x_src_eval = x_src[src_idx]
+        y_src_eval = y_src[src_idx]
+    else:
+        x_src_eval = x_src
+        y_src_eval = y_src
 
     @torch.no_grad()
     def capture_head(model, x: np.ndarray, y: np.ndarray, device: str) -> float:
-        """Capture the same classifier-head output used in the final experiment."""
+        """Capture target probabilities and source-head retention accuracy."""
         model.eval()
+
+        # --- target head outputs ---
         xt = torch.as_tensor(x, device=device, dtype=torch.float32)
+        d_t = torch.ones((xt.size(0),), device=device, dtype=torch.long)
+        z_t = model.encode(xt, d_cond=d_t, d_corr=d_t)
+        logits_t = model.predict(z_t)
 
-        # This reproduces the capture convention used in the final experiment:
-        # target routing ID = 1 at classifier-head evaluation.
-        d = torch.ones((xt.size(0),), device=device, dtype=torch.long)
-        z = model.encode(xt, d_cond=d, d_corr=d)
-        logits = model.predict(z)
+        # Stable six-class posterior from the physically valid logits.
+        p_t = probabilities_from_logits(logits_t, class_order)
+        p_t = np.array(p_t, dtype=np.float64, copy=True)
+        target_probabilities.append(p_t)
 
-        # Convert directly from the physically valid class logits. This is
-        # algebraically equivalent to selecting + renormalizing the legacy
-        # seven-way softmax, but remains stable if the unused class-0 logit
-        # dominates and the valid-class probabilities would underflow.
-        p = probabilities_from_logits(logits, class_order)
-        target_probabilities.append(np.array(p, dtype=np.float64, copy=True))
+        pred_t = class_order[np.argmax(p_t, axis=1)]
+        target_acc = float(np.mean(pred_t == y))
 
-        pred_labels = class_order[np.argmax(p, axis=1)]
-        return float(np.mean(pred_labels == y))
+        # --- source head accuracy: source labels only ---
+        xs = torch.as_tensor(x_src_eval, device=device, dtype=torch.float32)
+        d_s = torch.zeros((xs.size(0),), device=device, dtype=torch.long)
+        z_s = model.encode(xs, d_cond=d_s, d_corr=d_s)
+        logits_s = model.predict(z_s)
+        p_s = probabilities_from_logits(logits_s, class_order)
+        pred_s = class_order[np.argmax(p_s, axis=1)]
+        source_head_accuracies.append(float(np.mean(pred_s == y_src_eval)))
+
+        return target_acc
 
     cdan.head_acc = capture_head
     try:
@@ -363,14 +404,24 @@ def run_one_expert(
             f"Expert '{cfg['name']}' produced outputs for "
             f"{len(target_probabilities)}/{expected} target batches."
         )
+    if len(source_head_accuracies) != expected:
+        raise RuntimeError(
+            f"Expert '{cfg['name']}' produced source accuracies for "
+            f"{len(source_head_accuracies)}/{expected} target batches."
+        )
 
     for bi, p in enumerate(target_probabilities, start=2):
         if not np.all(np.isfinite(p)):
-            raise FloatingPointError(f"Non-finite probabilities from {cfg['name']} on b{bi:02d}.")
+            raise FloatingPointError(
+                f"Non-finite probabilities from {cfg['name']} on b{bi:02d}."
+            )
         if not np.allclose(p.sum(axis=1), 1.0, atol=1e-5):
-            raise FloatingPointError(f"Probabilities do not sum to one for {cfg['name']} on b{bi:02d}.")
+            raise FloatingPointError(
+                f"Probabilities do not sum to one for {cfg['name']} on b{bi:02d}."
+            )
 
-    return target_probabilities
+    source_mean = float(np.mean(source_head_accuracies))
+    return target_probabilities, source_mean, source_head_accuracies
 
 
 # =============================================================================
@@ -448,6 +499,14 @@ def main() -> None:
         default=2,
         help="Number of experts used in --smoke mode (default: 2).",
     )
+    parser.add_argument(
+        "--no-source-prune",
+        action="store_true",
+        help=(
+            "Disable the source-only expert pruning used in the original final "
+            "experiment. By default pruning is enabled for full runs."
+        ),
+    )
     args = parser.parse_args()
 
     if not (0.0 < args.tau < 1.0):
@@ -484,6 +543,12 @@ def main() -> None:
     print("Mode            :", "SMOKE TEST" if args.smoke else "FULL EXPERIMENT")
     print("ConfDS tau      :", args.tau, "(fixed; no target-test sweep)")
     print("Pair budget cap :", PAIR_N)
+    print(
+        "Source pruning  :",
+        "OFF (--no-source-prune)"
+        if args.no_source_prune
+        else f"ON (source acc >= {SRC_PRUNE_THRESH:.2f}; keep at least {SRC_PRUNE_KEEP_MIN})",
+    )
     print("CUDA available  :", torch.cuda.is_available())
     if args.smoke:
         print("Smoke settings  :", f"b02 only, {args.smoke_experts} experts, {args.smoke_iters} iterations")
@@ -491,6 +556,7 @@ def main() -> None:
 
     all_runs: List[List[float]] = []
     csv_rows: List[Dict] = []
+    pruning_rows: List[Dict] = []
     run_id = 0
 
     for pair_seed in pair_seeds:
@@ -558,11 +624,11 @@ def main() -> None:
 
             print("Experts         :", len(configs))
 
-            # expert_outputs[m][bi] -> probability matrix (N_b, C)
-            expert_outputs: List[List[np.ndarray]] = []
+            # Train all experts and record source-only retention scores.
+            expert_records: List[Dict] = []
             for j, cfg in enumerate(configs, start=1):
                 print(f"\n[Expert {j:02d}/{len(configs):02d}] {cfg['name']}")
-                probabilities = run_one_expert(
+                probabilities, source_acc_mean, source_acc_per_batch = run_one_expert(
                     cdan_path,
                     data,
                     labels,
@@ -570,7 +636,69 @@ def main() -> None:
                     class_order,
                     cfg,
                 )
-                expert_outputs.append(probabilities)
+                print(f"[SOURCE] mean head accuracy={source_acc_mean:.4f}")
+                expert_records.append(
+                    dict(
+                        name=cfg["name"],
+                        probabilities=probabilities,
+                        source_acc_mean=source_acc_mean,
+                        source_acc_per_batch=source_acc_per_batch,
+                    )
+                )
+
+            # -------------------------------------------------------------
+            # Source-only expert pruning used in the original final runner.
+            # No target labels are consulted here.
+            # -------------------------------------------------------------
+            source_scores = np.asarray(
+                [r["source_acc_mean"] for r in expert_records],
+                dtype=np.float64,
+            )
+            keep = np.ones(len(expert_records), dtype=bool)
+
+            pruning_enabled = ENABLE_SRC_PRUNE and not args.no_source_prune
+            if pruning_enabled:
+                keep = source_scores >= float(SRC_PRUNE_THRESH)
+                keep_min = min(int(SRC_PRUNE_KEEP_MIN), len(expert_records))
+                if int(np.sum(keep)) < keep_min:
+                    order = np.argsort(-source_scores, kind="stable")
+                    keep = np.zeros(len(expert_records), dtype=bool)
+                    keep[order[:keep_min]] = True
+
+                print(
+                    f"[PRUNE] kept {int(np.sum(keep))}/{len(expert_records)} experts "
+                    f"using source-only threshold={SRC_PRUNE_THRESH:.2f}"
+                )
+            else:
+                print(f"[PRUNE] disabled; kept all {len(expert_records)} experts")
+
+            for rec, is_kept in zip(expert_records, keep.tolist()):
+                pruning_rows.append(
+                    dict(
+                        run_id=run_id,
+                        train_seed=run_seed,
+                        pair_shuffle_seed=pair_seed,
+                        expert=rec["name"],
+                        source_head_acc_mean=f"{rec['source_acc_mean']:.8f}",
+                        kept=bool(is_kept),
+                        threshold=f"{SRC_PRUNE_THRESH:.6f}",
+                        pruning_enabled=bool(pruning_enabled),
+                        smoke_test=bool(args.smoke),
+                    )
+                )
+
+            kept_records = [
+                rec for rec, is_kept in zip(expert_records, keep.tolist()) if is_kept
+            ]
+            if not kept_records:
+                raise RuntimeError("Source pruning removed all experts.")
+
+            # expert_outputs[m][bi] -> probability matrix (N_b, C)
+            expert_outputs: List[List[np.ndarray]] = [
+                rec["probabilities"] for rec in kept_records
+            ]
+            kept_expert_names = [rec["name"] for rec in kept_records]
+            print("Fusion experts  :", len(expert_outputs))
 
             # Map the dataset's class labels to 0..C-1 indices expected by ConfDS.
             label_to_index = {int(label): i for i, label in enumerate(class_order.tolist())}
@@ -630,7 +758,9 @@ def main() -> None:
                         batch=f"b{bi+2:02d}",
                         accuracy=f"{accuracy:.8f}",
                         calibration_labels=len(cal_idx),
-                        n_experts=len(configs),
+                        n_experts=len(expert_outputs),
+                        source_pruning=bool(pruning_enabled),
+                        source_prune_threshold=f"{SRC_PRUNE_THRESH:.6f}",
                         confds_tau=f"{args.tau:.6f}",
                         smoke_test=bool(args.smoke),
                     )
@@ -657,11 +787,14 @@ def main() -> None:
     suffix = "smoke" if args.smoke else "full"
     runs_csv = output_dir / f"confds_{suffix}_runs.csv"
     summary_csv = output_dir / f"confds_{suffix}_summary.csv"
+    pruning_csv = output_dir / f"confds_{suffix}_source_pruning.csv"
     write_run_csv(runs_csv, csv_rows)
     write_summary_csv(summary_csv, A)
+    write_run_csv(pruning_csv, pruning_rows)
     print("\nSaved:")
     print(" ", runs_csv)
     print(" ", summary_csv)
+    print(" ", pruning_csv)
 
     if args.smoke:
         print(
