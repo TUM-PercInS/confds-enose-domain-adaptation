@@ -77,76 +77,57 @@ than relying on a single fixed configuration.
 
 ### 1. Diverse domain-adaptation experts
 
-Each expert uses the same basic gas-classification architecture but follows a
-different adaptation trajectory.
+Each expert uses the same basic gas-classification architecture but follows a different adaptation trajectory.
 
-For expert \(m\), the training objective can be written as
+For expert $m$, the training objective is
 
-\[
+$$
 \mathcal{L}^{(m)}
 =
 \mathcal{L}_{\mathrm{cls}}
 +
-\lambda_{\mathrm{adv}}^{(m)}
-\mathcal{L}_{\mathrm{CDAN}}
+\lambda_{\mathrm{adv}}^{(m)} \mathcal{L}_{\mathrm{CDAN}}
 +
-\lambda_{\mathrm{pair}}^{(m)}
-\mathcal{L}_{\mathrm{pair}}
+\lambda_{\mathrm{pair}}^{(m)} \mathcal{L}_{\mathrm{pair}}
 +
-\lambda_{\mathrm{pst}}^{(m)}
-\mathcal{L}_{\mathrm{pst}}.
-\]
+\lambda_{\mathrm{pst}}^{(m)} \mathcal{L}_{\mathrm{pst}}.
+$$
 
 The individual terms serve different purposes:
 
-- **Source classification loss**
-  \(\mathcal{L}_{\mathrm{cls}}\) preserves gas-discriminative information
-  learned from the initial calibration domain.
+- **Source classification loss** $\mathcal{L}_{\mathrm{cls}}$ preserves gas-discriminative information learned from the initial calibration domain.
+- **Conditional domain-adversarial loss** $\mathcal{L}_{\mathrm{CDAN}}$ reduces the distribution discrepancy between the source measurements and the current drift-affected target batch.
+- **Paired alignment loss** $\mathcal{L}_{\mathrm{pair}}$ exploits the small number of available source--target calibration pairs.
+- **Pseudo-label self-training** $\mathcal{L}_{\mathrm{pst}}$ uses high-confidence target predictions to strengthen class-specific adaptation.
 
-- **Conditional domain-adversarial loss**
-  \(\mathcal{L}_{\mathrm{CDAN}}\) reduces the distribution discrepancy between
-  the source measurements and the current drift-affected target batch.
+Rather than selecting one fixed combination of these mechanisms, the implementation deliberately varies adaptation strengths, confidence thresholds, conditioning strategies, domain-normalization settings, and pair-alignment configurations.
 
-- **Paired alignment loss**
-  \(\mathcal{L}_{\mathrm{pair}}\) exploits the small number of available
-  source--target calibration pairs.
-
-- **Pseudo-label self-training**
-  \(\mathcal{L}_{\mathrm{pst}}\) uses high-confidence target predictions to
-  strengthen class-specific adaptation.
-
-Rather than selecting one fixed combination of these mechanisms, the
-implementation deliberately varies adaptation strengths, confidence
-thresholds, conditioning strategies, domain-normalization settings, and
-pair-alignment configurations.
-
-This produces a pool of experts with complementary behaviour under different
-drift conditions.
+This produces a pool of experts with complementary behaviour under different drift conditions.
 
 ---
 
 ### 2. Source-retention filtering
 
-Domain adaptation can occasionally improve target alignment at the expense
-of destroying useful source-domain decision structure.
+Domain adaptation can occasionally improve target alignment at the expense of degrading useful source-domain decision structure.
 
-To remove clearly degraded experts without using additional target labels,
-the implementation evaluates each adapted expert on the labelled source
-domain.
+To remove clearly degraded experts without using additional target labels, the implementation evaluates each adapted expert on the labelled source domain.
 
-Experts whose mean source classification accuracy falls below a predefined
-threshold are removed before fusion:
+For expert $m$, the mean source-domain accuracy over the target adaptation stages is
 
-\[
+$$
 \bar{A}_{\mathrm{src}}^{(m)}
 =
 \frac{1}{B}
 \sum_{b=1}^{B}
 A_{\mathrm{src}}^{(m,b)}.
-\]
+$$
+
+Experts whose mean source accuracy falls below a predefined threshold are removed before fusion.
 
 The default implementation uses
 
 ```text
+source accuracy threshold = 0.95
+minimum number of retained experts = 10
 source accuracy threshold = 0.95
 minimum number of retained experts = 10
