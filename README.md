@@ -84,13 +84,13 @@ For expert $m$, the training objective is
 $$
 \mathcal{L}^{(m)}
 =
-\mathcal{L}_{\mathrm{cls}}
+{L}_{\mathrm{cls}}
 +
-\lambda_{\mathrm{adv}}^{(m)} \mathcal{L}_{\mathrm{CDAN}}
+\lambda_{\mathrm{adv}}^{(m)} {L}_{\mathrm{CDAN}}
 +
-\lambda_{\mathrm{pair}}^{(m)} \mathcal{L}_{\mathrm{pair}}
+\lambda_{\mathrm{pair}}^{(m)} {L}_{\mathrm{pair}}
 +
-\lambda_{\mathrm{pst}}^{(m)} \mathcal{L}_{\mathrm{pst}}.
+\lambda_{\mathrm{pst}}^{(m)} {L}_{\mathrm{pst}}.
 $$
 
 The individual terms serve different purposes:
