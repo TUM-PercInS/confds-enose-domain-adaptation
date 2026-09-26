@@ -82,7 +82,7 @@ Each expert uses the same basic gas-classification architecture but follows a di
 For expert $m$, the training objective is
 
 $$
-\mathcal{L}^{(m)}
+{L}^{(m)}
 =
 {L}_{\mathrm{cls}}
 +
