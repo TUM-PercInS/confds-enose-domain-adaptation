@@ -115,8 +115,7 @@ To remove clearly degraded experts without consuming additional target labels, e
 For expert $m$, the mean source-domain accuracy across the target adaptation stages is
 
 $$
-\bar{A}_{\mathrm{src}}^{(m)}
-=
+\bar{A}_{\mathrm{src}}^{(m)}=
 \frac{1}{B}
 \sum_{b=1}^{B}
 A_{\mathrm{src}}^{(m,b)}.
