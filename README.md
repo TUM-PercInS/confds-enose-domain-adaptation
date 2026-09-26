@@ -79,21 +79,7 @@ The proposed framework consists of three main components:
 
 Each expert uses the same basic gas-classification architecture but follows a different adaptation trajectory.
 
-For expert $m$, the training objective is
-
-$$
-{L}^{(m)}
-=
-{L}_{\mathrm{cls}}
-+
-\lambda_{\mathrm{adv}}^{(m)} {L}_{\mathrm{CDAN}}
-+
-\lambda_{\mathrm{pair}}^{(m)} {L}_{\mathrm{pair}}
-+
-\lambda_{\mathrm{pst}}^{(m)} {L}_{\mathrm{pst}}.
-$$
-
-The individual terms serve different purposes:
+For expert $m$, the training objective is a weighted sum of terms that serves different purposes:
 
 - **Source classification loss** $\mathcal{L}_{\mathrm{cls}}$ preserves gas-discriminative information learned from the initial calibration domain.
 - **Conditional domain-adversarial loss** $\mathcal{L}_{\mathrm{CDAN}}$ reduces the distribution discrepancy between the source measurements and the current drift-affected target batch.
