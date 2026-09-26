@@ -4,10 +4,10 @@ Reference implementation for:
 
 **Progressive Domain Adaptation under Sensor Drift for Gas Classification with Limited Calibration Labels**
 
-Han Fan and Achim J. Lilienthal  
-Munich Institute of Robotics and Machine Intelligence (MIRMI)  
-Chair of Perception for Intelligent Systems  
-Technical University of Munich, Germany
+Han Fan<sup>1,2</sup> and Achim J. Lilienthal<sup>1,2</sup>  
+
+<sup>1</sup> Robot Navigation and Perception (RNP) Lab, Centre for Applied Autonomous Sensor Systems (AASS), Örebro University, Sweden  
+<sup>2</sup> Munich Institute of Robotics and Machine Intelligence (MIRMI), Chair of Perception for Intelligent Systems, Technical University of Munich, Germany
 
 ---
 
